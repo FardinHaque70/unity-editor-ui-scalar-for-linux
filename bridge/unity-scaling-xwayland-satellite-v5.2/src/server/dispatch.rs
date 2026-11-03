@@ -1,5 +1,5 @@
 use super::*;
-use hecs::{CommandBuffer, DynamicBundle};
+use hecs::CommandBuffer;
 use log::{debug, error, trace, warn};
 use macros::simple_event_shunt;
 use std::sync::{Arc, OnceLock};
@@ -113,6 +113,13 @@ impl<S: X11Selection> Dispatch<WlSurface, Entity> for InnerServerState<S> {
                 }
                 if buffer.is_none() {
                     trace!("xwayland attached null buffer to {client:?}");
+                } else {
+                    let kind = match role.as_deref() {
+                        Some(SurfaceRole::Popup(_)) => "popup",
+                        Some(SurfaceRole::Toplevel(_)) => "toplevel",
+                        None => "unassociated",
+                    };
+                    debug!("attaching a buffer to {client:?} ({kind}, configured: {configured})");
                 }
                 let buffer = buffer.as_ref().map(|b| {
                     let entity: Entity = b.data().copied().unwrap();
@@ -1636,27 +1643,9 @@ impl<S: X11Selection> Dispatch<XwaylandSurfaceV1, Entity> for InnerServerState<S
                     .map(|i| i.0);
 
                 if let Some(win_entity) = win_entity {
-                    let bundle = state.world.take(win_entity).unwrap();
-                    if !bundle.has::<x::Window>() {
-                        warn!(
-                            "Window with same serial ({serial:?}) as {surface_id} has been destroyed?"
-                        );
-                        return;
-                    }
-                    let mut builder = hecs::EntityBuilder::new();
-                    builder.add_bundle(bundle);
-                    state.world.insert(*entity, builder.build()).unwrap();
-                    state.world.remove_one::<SurfaceSerial>(*entity).unwrap();
-                    let data = state.world.entity(*entity).unwrap();
-                    let win = data.get::<&x::Window>().as_deref().copied().unwrap();
-                    state.windows.insert(win, *entity);
-                    debug!("associate {surface_id} with {win:?} (serial {serial:?})");
-                    if data.get::<&WindowData>().unwrap().mapped
-                        && state.create_role_window(win, *entity)
-                    {
-                        state.activate_window(win);
-                    }
+                    state.associate_surface_with_window(*entity, win_entity);
                 } else {
+                    debug!("surface {surface_id} serial {serial:?} has no window yet");
                     state.world.insert(*entity, (serial,)).unwrap();
                 }
             }

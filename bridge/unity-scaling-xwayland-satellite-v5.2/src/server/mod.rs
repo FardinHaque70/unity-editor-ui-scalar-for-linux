@@ -251,6 +251,9 @@ struct PopupData {
     positioner: XdgPositioner,
     xdg: XdgSurfaceData,
     native_size: Option<PopupNativeSize>,
+    /// X parent of this popup. Popup geometry is relative to it, while the X
+    /// window it mirrors lives in absolute root coordinates.
+    parent: x::Window,
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -853,9 +856,14 @@ impl<C: XConnection> ServerState<C> {
                     self.connection.send_take_focus(window);
                 } else {
                     self.connection.focus_window(window, output_name);
-                    if !is_popup {
-                        self.last_focused_toplevel = Some(window);
-                    }
+                }
+                // The compositor focused this toplevel in both cases. Clients
+                // using WM_TAKE_FOCUS (most GTK and Qt apps, Unity included)
+                // still expect the bridge to know the focused toplevel: it is
+                // the restore target after popups close and the surface used
+                // for xdg_activation tokens when the client asks for focus.
+                if !is_popup {
+                    self.last_focused_toplevel = Some(window);
                 }
             } else if self.unfocus {
                 self.connection.focus_window(x::WINDOW_NONE, None);
@@ -1157,7 +1165,92 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
             return;
         };
 
-        self.world.insert(id, (SurfaceSerial(serial),)).unwrap();
+        let serial = SurfaceSerial(serial);
+        debug!("window {window:?} serial {serial:?}");
+        self.world.insert(id, (SurfaceSerial(serial.0),)).unwrap();
+
+        // Xwayland announces the serial on the window and on the wl_surface in
+        // whichever order it gets to them. When the surface came first its serial
+        // is parked on the surface entity; finish the association from here,
+        // otherwise a mapped popup keeps a surface without any role and the
+        // compositor never displays it.
+        let pending = self
+            .world
+            .query_mut::<(&WlSurface, &SurfaceSerial)>()
+            .without::<&x::Window>()
+            .into_iter()
+            .find(|(_, (_, other))| other.0 == serial.0)
+            .map(|(entity, _)| entity);
+        if let Some(surface) = pending {
+            debug!("surface for serial {serial:?} arrived before the window");
+            self.associate_surface_with_window(surface, id);
+        }
+    }
+
+    /// Move an associated X window onto the surface that announced its serial.
+    /// Returns true when the association and, for mapped windows, the role were
+    /// created.
+    fn associate_surface_with_window(&mut self, surface: Entity, window_entity: Entity) -> bool {
+        if surface == window_entity {
+            return false;
+        }
+        if self.world.get::<&x::Window>(window_entity).is_err() {
+            warn!("Window with the same serial as {surface:?} has been destroyed?");
+            return false;
+        }
+        let Ok(bundle) = self.world.take(window_entity) else {
+            return false;
+        };
+        let mut builder = hecs::EntityBuilder::new();
+        builder.add_bundle(bundle);
+        if self.world.insert(surface, builder.build()).is_err() {
+            return false;
+        }
+        let _ = self.world.remove_one::<SurfaceSerial>(surface);
+
+        let (window, surface_id, mapped) = {
+            let Ok(data) = self.world.entity(surface) else {
+                return false;
+            };
+            let window = data.get::<&x::Window>().as_deref().copied();
+            let mapped = data.get::<&WindowData>().map(|data| data.mapped);
+            let surface_id = data.get::<&WlSurface>().map(|surface| surface.id());
+            match (window, mapped, surface_id) {
+                (Some(window), Some(mapped), Some(surface_id)) => (window, surface_id, mapped),
+                _ => return false,
+            }
+        };
+
+        self.windows.insert(window, surface);
+        debug!("associate {surface_id:?} with {window:?}");
+        if mapped && self.create_role_window(window, surface) {
+            self.activate_window(window);
+        }
+        true
+    }
+
+    /// Absolute X position of a window, used for popup geometry.
+    fn window_position(&self, window: x::Window) -> (i32, i32) {
+        self.windows
+            .get(&window)
+            .copied()
+            .and_then(|id| self.world.entity(id).ok())
+            .and_then(|data| {
+                data.get::<&WindowData>()
+                    .map(|data| (i32::from(data.attrs.dims.x), i32::from(data.attrs.dims.y)))
+            })
+            .unwrap_or((0, 0))
+    }
+
+    /// Output origin of a window, in X pixels. Popups inherit it because their own
+    /// output enter event arrives after their first configure.
+    fn window_output_offset(&self, window: x::Window) -> WindowOutputOffset {
+        self.windows
+            .get(&window)
+            .copied()
+            .and_then(|id| self.world.entity(id).ok())
+            .and_then(|data| data.get::<&WindowData>().map(|data| data.output_offset))
+            .unwrap_or_default()
     }
 
     pub fn can_change_position(&self, window: x::Window) -> bool {
@@ -1209,16 +1302,26 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
             return;
         }
 
-        let mut query = data.query::<(&mut SurfaceRole, &SurfaceScaleFactor)>();
-        let Some((role, scale_factor)) = query.get() else {
+        // Release this window's WindowData borrow: reading the parent's position
+        // and querying this window again both need the same component type.
+        drop(win);
+        let popup_parent = data.get::<&SurfaceRole>().and_then(|role| match &*role {
+            SurfaceRole::Popup(Some(popup)) => Some(popup.parent),
+            _ => None,
+        });
+        let popup_origin = popup_parent.map(|parent| self.window_position(parent));
+
+        let mut query = data.query::<(&mut SurfaceRole, &SurfaceScaleFactor, &mut WindowData)>();
+        let Some((role, scale_factor, window_data)) = query.get() else {
             return;
         };
 
         match role {
             SurfaceRole::Popup(Some(popup)) => {
+                let (parent_x, parent_y) = popup_origin.unwrap_or((0, 0));
                 popup.positioner.set_offset(
-                    ((event.x() as i32 - win.output_offset.x) as f64 / scale_factor.0) as i32,
-                    ((event.y() as i32 - win.output_offset.y) as f64 / scale_factor.0) as i32,
+                    ((event.x() as i32 - parent_x) as f64 / scale_factor.0) as i32,
+                    ((event.y() as i32 - parent_y) as f64 / scale_factor.0) as i32,
                 );
                 let (width, height) = if popup.native_size.is_some() {
                     let requested =
@@ -1235,10 +1338,9 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
                 popup.popup.reposition(&popup.positioner, 0);
             }
             SurfaceRole::Toplevel(Some(_)) => {
-                win.attrs.dims.width = dims.width;
-                win.attrs.dims.height = dims.height;
+                window_data.attrs.dims.width = dims.width;
+                window_data.attrs.dims.height = dims.height;
                 drop(query);
-                drop(win);
                 update_surface_viewport(&self.world, self.world.query_one(data.entity()).unwrap());
             }
             other => warn!("Non popup ({other:?}) being reconfigured, behavior may be off."),
@@ -1535,6 +1637,14 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
 
         let (role, is_toplevel) = if let Some(parent) = popup_for {
             let data = self.create_popup(entity, xdg_surface, parent);
+            // A popup is positioned in its parent's output space, but its own
+            // wl_surface enter event arrives after the first configure. Inheriting
+            // the parent's output origin keeps that first configure from moving
+            // the X window to the output origin and desynchronizing the client.
+            let parent_offset = self.window_output_offset(parent);
+            if let Ok(mut window) = self.world.get::<&mut WindowData>(entity) {
+                window.output_offset = parent_offset;
+            }
             (SurfaceRole::Popup(Some(data)), false)
         } else {
             let data = self.create_toplevel(entity, xdg_surface, fullscreen, splash);
@@ -1773,6 +1883,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
             popup,
             positioner,
             native_size,
+            parent,
             xdg: XdgSurfaceData {
                 surface: xdg,
                 configured: false,

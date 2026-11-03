@@ -41,6 +41,37 @@ conflict stops the uninstall so the app and backups remain available for repair.
 Configuration and logs are retained. If an original backup was changed or lost,
 recover the Editor from your official installation rather than forcing a restore.
 
+## Unity Hub installed as a Flatpak
+
+Unity Hub is distributed on Flathub as `com.unity.UnityHub`, and it runs the
+Editor it launches **inside its own sandbox**. That sandbox has no `Xwayland`, no
+`kscreen-doctor` and an older glibc than the native helper, so a scaled launch
+there fails and Hub reports the child process exiting with code 1.
+
+The generated launcher therefore checks for `/.flatpak-info` and re-runs itself
+on the host through `flatpak-spawn --host` before doing anything else. The Editor,
+the helper and the private display then all live on the host, which is the only
+arrangement where they can share one X11 socket. Hub's Flathub build grants the
+`org.freedesktop.Flatpak` talk permission by default, which is what makes this
+work; without it the launcher keeps the previous sandboxed behavior.
+
+The host process receives `flatpak-spawn`'s cleaned environment (host `PATH`,
+host `XDG_RUNTIME_DIR`, no `LD_LIBRARY_PATH` or `/app` paths), so the bridge and
+Unity start exactly as they do from a host terminal. Hub's `-projectpath`
+argument is recognized in any case.
+
+Two consequences of running on the host:
+
+- Unity's own Hub IPC and licensing channels may be re-established natively
+  instead of reusing Hub's sandbox sockets. Licensing continues to work; Hub may
+  briefly report the Editor as disconnected.
+- `UNITY_SCALE_DISABLE_SANDBOX_HOP=1` in the Editor's environment suppresses the
+  host hop for diagnosis.
+
+A launcher written by an earlier version does not contain the hop, so an existing
+override must be switched off and on once after upgrading to regenerate it. The
+app refuses to rewrite an enabled launcher silently.
+
 ## Native application identity
 
 While integration is enabled, Unity's `EditorApplication.applicationPath` reports

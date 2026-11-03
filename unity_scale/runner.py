@@ -42,10 +42,12 @@ def _executable(value: str) -> Path:
 
 
 def _project_from_args(args: list[str]) -> str | None:
+    # Unity Hub passes -projectpath in lower case; Unity itself is insensitive.
     for index, value in enumerate(args):
-        if value == "-projectPath" and index + 1 < len(args):
+        lowered = value.lower()
+        if lowered == "-projectpath" and index + 1 < len(args):
             return str(Path(args[index + 1]).expanduser().resolve())
-        if value.startswith("-projectPath="):
+        if lowered.startswith("-projectpath="):
             return str(Path(value.partition("=")[2]).expanduser().resolve())
     return None
 
@@ -166,7 +168,7 @@ def launch_plan(editor_path: str, project=None, extra_args=None, real_executable
                    "backing_size": size * density, "source": source},
         "helper_environment": {**cursor_env, "UNITY_SATELLITE_RENDER_SCALE": str(density),
                                "UNITY_SATELLITE_UI_MULTIPLIER": format(multiplier, ".16g"),
-                               "RUST_LOG": "warn"},
+                               "RUST_LOG": os.environ.get("UNITY_SCALE_BRIDGE_LOG", "warn")},
         "editor_environment": {**cursor_env, "UNITY_SCALE_ACTIVE": "1",
                                "GDK_BACKEND": "x11", "GDK_SCALE": str(density),
                                "GDK_DPI_SCALE": format(1.0 / density, ".8g")},

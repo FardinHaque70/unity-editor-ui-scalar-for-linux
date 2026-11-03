@@ -1193,6 +1193,26 @@ fn pass_through_globals() {
 }
 
 #[test]
+fn take_focus_toplevel_is_still_the_focus_restore_target() {
+    let (mut f, comp) = TestFixture::new_with_compositor();
+    let win = Window::new(1);
+    f.create_toplevel(&comp, win);
+    f.satellite.to_focus = Some(super::FocusData {
+        window: win,
+        output_name: None,
+        is_popup: false,
+        has_take_focus: true,
+    });
+    f.run();
+    assert_eq!(f.connection().send_take_focus_window, Some(win));
+    assert_eq!(
+        f.satellite.last_focused_toplevel,
+        Some(win),
+        "WM_TAKE_FOCUS toplevel must remain the focus restore target"
+    );
+}
+
+#[test]
 fn last_activated_toplevel_is_focused() {
     let (mut f, comp) = TestFixture::new_with_compositor();
     let win1 = Window::new(1);
@@ -1218,6 +1238,50 @@ fn last_activated_toplevel_is_focused() {
         f.connection().focused_window,
         Some(win2),
         "toplevel focus did not stay the same"
+    );
+}
+
+#[test]
+fn surface_serial_before_window_serial_still_associates() {
+    let (mut f, comp) = TestFixture::new_with_compositor();
+    let t_win = Window::new(1);
+    let (_, toplevel_id) = f.create_toplevel(&comp, t_win);
+
+    let win = Window::new(2);
+    let (surface, _) = f.create_popup(&comp, PopupBuilder::new(win, t_win, toplevel_id));
+    f.satellite.unmap_window(win);
+    surface.obj.destroy();
+    f.run();
+
+    // Remap: Xwayland announces the surface serial before the window serial.
+    let (_, new_surface) = comp.create_surface();
+    let xwl = TestObject::<XwaylandSurfaceV1>::from_request(
+        &comp.shell.obj,
+        Req::<XwaylandShellV1>::GetXwaylandSurface {
+            surface: new_surface.obj.clone(),
+        },
+    );
+    let serial = f.surface_serial;
+    f.surface_serial += 1;
+    let serial_lo = (serial & 0xFF) as u32;
+    let serial_hi = ((serial >> 8) & 0xFF) as u32;
+    xwl.send_request(Req::<XwaylandSurfaceV1>::SetSerial {
+        serial_lo,
+        serial_hi,
+    })
+    .unwrap();
+    f.run();
+
+    f.satellite.map_window(win);
+    f.satellite.set_window_serial(win, [serial_lo, serial_hi]);
+    f.run();
+
+    let id = f.testwl.last_created_surface_id().expect("no surface");
+    let data = f.testwl.get_surface_data(id).unwrap();
+    assert!(
+        matches!(data.role, Some(testwl::SurfaceRole::Popup(_))),
+        "popup role missing after a reversed association: {:?}",
+        data.role
     );
 }
 
@@ -2128,6 +2192,104 @@ fn output_offset_negative_position_update_xdg() {
     f.run();
     check_output_position_event(&output, (0, 500));
     check_output_position_event_xdg(&xdg_output, &output2, (500, 0), true);
+}
+
+#[test]
+fn popup_uses_parent_output_origin_before_its_own_enter() {
+    let (mut f, comp) = TestFixture::new_with_compositor();
+    f.new_output(0, 0);
+    let (_, output) = f.new_output(500, 100);
+    f.run();
+
+    let toplevel = Window::new(1);
+    let (_, toplevel_id) = f.create_toplevel(&comp, toplevel);
+    f.testwl.move_surface_to_output(toplevel_id, &output);
+    f.run();
+    f.assert_window_dimensions(
+        toplevel,
+        toplevel_id,
+        WindowDims {
+            x: 500,
+            y: 100,
+            width: 100,
+            height: 100,
+        },
+    );
+
+    let popup = Window::new(2);
+    let (_, popup_id) = f.create_popup(
+        &comp,
+        PopupBuilder::new(popup, toplevel, toplevel_id)
+            .x(510)
+            .y(110),
+    );
+    // The popup has not received its own wl_surface enter event yet. Its first
+    // configure must still use the parent's output origin instead of jumping to
+    // the X root origin.
+    f.assert_window_dimensions(
+        popup,
+        popup_id,
+        WindowDims {
+            x: 510,
+            y: 110,
+            width: 50,
+            height: 50,
+        },
+    );
+}
+
+#[test]
+fn popup_offset_is_relative_to_its_parent_window() {
+    let (mut f, comp) = TestFixture::new_with_compositor();
+    let toplevel = Window::new(1);
+    let (_, toplevel_id) = f.create_toplevel(&comp, toplevel);
+
+    // Move the parent away from the output origin, as a floating window would be.
+    {
+        let entity = f.satellite.windows[&toplevel];
+        let mut data = f
+            .satellite
+            .world
+            .get::<&mut super::WindowData>(entity)
+            .unwrap();
+        data.attrs.dims.x = 300;
+        data.attrs.dims.y = 200;
+    }
+
+    let popup = Window::new(2);
+    let (_, popup_id) = f.create_popup(
+        &comp,
+        PopupBuilder::new(popup, toplevel, toplevel_id)
+            .x(340)
+            .y(260)
+            .check_size_and_pos(false),
+    );
+    let data = f.testwl.get_surface_data(popup_id).unwrap();
+    assert_eq!(
+        data.popup().positioner_state.offset,
+        testwl::Vec2 { x: 40, y: 60 },
+        "popup creation used the output origin instead of the parent window"
+    );
+    drop(data);
+
+    // A client reposition must stay relative to the parent too, not to the output.
+    f.reconfigure_window(
+        popup,
+        WindowDims {
+            x: 360,
+            y: 280,
+            width: 50,
+            height: 50,
+        },
+        true,
+    );
+    f.run();
+    let data = f.testwl.get_surface_data(popup_id).unwrap();
+    assert_eq!(
+        data.popup().positioner_state.offset,
+        testwl::Vec2 { x: 60, y: 80 },
+        "popup reposition used the output origin instead of the parent window"
+    );
 }
 
 #[test]

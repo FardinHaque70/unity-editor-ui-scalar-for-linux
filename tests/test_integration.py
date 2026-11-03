@@ -17,7 +17,8 @@ class IntegrationTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="unity-scale-integration-")
         self.root = Path(self.temporary.name)
-        self.environment = patch.dict(os.environ, {"XDG_STATE_HOME": str(self.root / "state")})
+        self.environment = patch.dict(os.environ, {"XDG_STATE_HOME": str(self.root / "state"),
+                                                    "UNITY_SCALE_DISABLE_SANDBOX_HOP": "1"})
         self.environment.start()
         self.editor = self.root / "Editor with spaces 'quoted' $literal" / "6000.3.27f2/Editor/Unity"
         self.editor.parent.mkdir(parents=True)
@@ -271,6 +272,13 @@ class IntegrationTests(unittest.TestCase):
         self.assertTrue(integration.enable(self.editor.parent.parent, entrypoint=self.entry)["enabled"])
         integration.disable(self.editor.parent)
         self.assertEqual(self.editor.read_bytes(), self.original)
+
+    def test_wrapper_leaves_a_flatpak_sandbox_through_the_host_spawn(self):
+        self.enable()
+        content = self.editor.read_text()
+        self.assertIn('flatpak-spawn", ["flatpak-spawn", "--host"', content)
+        self.assertIn('"/.flatpak-info"', content)
+        compile(content, str(self.editor), 'exec')
 
 
 if __name__ == "__main__":

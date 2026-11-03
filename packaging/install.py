@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""User-local install/uninstall with an owned-file manifest. No network or sudo."""
+"""User-local install/uninstall with an owned-file manifest. No network or sudo unless --with-dependencies is requested."""
 from __future__ import annotations
 import argparse
 import hashlib
@@ -120,6 +120,29 @@ def _unused_backup(path):
     return Path(name)
 
 
+def _run_script(arguments, label):
+    try:
+        subprocess.run(arguments,check=True)
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(f'{label} failed with exit status {exc.returncode}.') from exc
+    except OSError as exc:
+        raise RuntimeError(f'Could not run {arguments[0]}: {exc}') from exc
+
+
+def ensure_dependencies():
+    """Install distribution packages and build the bridge when it is missing."""
+    helper=ROOT/'libexec/xwayland-satellite'
+    dependency_script=[str(ROOT/'packaging/install-deps.sh')]
+    if not Path(dependency_script[0]).is_file():
+        raise RuntimeError('Missing packaging/install-deps.sh; install dependencies manually.')
+    if helper.is_file():dependency_script.append('--runtime-only')
+    _run_script(dependency_script,'Dependency installation')
+    if not helper.is_file():
+        _run_script([str(ROOT/'packaging/build-bridge.sh')],'Bridge build')
+    if not helper.is_file():
+        raise RuntimeError('The bridge build did not produce libexec/xwayland-satellite.')
+
+
 def install(prefix, *, skip_dependency_check=False):
     prefix=prefix_root(prefix)
     if not skip_dependency_check:check_dependencies()
@@ -233,12 +256,16 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--prefix',help='Install under this prefix (default ~/.local)')
     parser.add_argument('--uninstall',action='store_true')
+    parser.add_argument('--with-dependencies',action='store_true',
+                        help='Install distribution packages and build the bridge first (uses sudo)')
     parser.add_argument('--skip-dependency-check',action='store_true',help=argparse.SUPPRESS)
     args=parser.parse_args()
     try:
         prefix=prefix_root(args.prefix)
         if args.uninstall:uninstall(prefix)
-        else:install(prefix,skip_dependency_check=args.skip_dependency_check)
+        else:
+            if args.with_dependencies:ensure_dependencies()
+            install(prefix,skip_dependency_check=args.skip_dependency_check)
         return 0
     except (RuntimeError,OSError,ValueError) as exc:
         print(APP_NAME+' installer: '+str(exc),file=sys.stderr);return 1

@@ -198,6 +198,18 @@ def _wrapper(editor: Path, backup: Path, entrypoint: Path) -> bytes:
 import os
 import sys
 
+# Unity Hub is distributed as a Flatpak that runs this Editor inside its own
+# sandbox, where Xwayland and the bridge's glibc are unavailable. The Editor and
+# its display bridge must run on the host, so leave the sandbox first.
+if (os.path.exists("/.flatpak-info")
+        and os.environ.get("UNITY_SCALE_DISABLE_SANDBOX_HOP") != "1"):
+    try:
+        os.execvp("flatpak-spawn", ["flatpak-spawn", "--host",
+                                     sys.executable or "/usr/bin/python3",
+                                     os.path.abspath(__file__), *sys.argv[1:]])
+    except OSError:
+        pass  # No host spawn available: keep the current behavior.
+
 editor = {str(editor)!r}
 original = {str(backup)!r}
 entrypoint = {str(entrypoint)!r}

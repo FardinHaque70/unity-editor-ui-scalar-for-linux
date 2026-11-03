@@ -156,4 +156,36 @@ class InstallTests(unittest.TestCase):
             disable.assert_not_called()
         self.assertTrue(destination.exists())
 
+    def _fake_source_tree(self):
+        root=self.root/'app';(root/'packaging').mkdir(parents=True)
+        for name in ('install-deps.sh','build-bridge.sh'):(root/'packaging'/name).write_text('')
+        return root
+
+    def test_with_dependencies_installs_packages_and_builds_missing_bridge(self):
+        root=self._fake_source_tree();calls=[]
+        def fake(arguments,label):
+            calls.append(arguments)
+            if arguments[0].endswith('build-bridge.sh'):
+                (root/'libexec').mkdir(exist_ok=True);(root/'libexec/xwayland-satellite').write_text('')
+        with patch.object(installer,'ROOT',root), patch.object(installer,'_run_script',side_effect=fake):
+            installer.ensure_dependencies()
+        self.assertEqual(calls,[[str(root/'packaging/install-deps.sh')],[str(root/'packaging/build-bridge.sh')]])
+
+    def test_with_dependencies_uses_runtime_only_for_a_present_bridge(self):
+        root=self._fake_source_tree();(root/'libexec').mkdir();(root/'libexec/xwayland-satellite').write_text('')
+        with patch.object(installer,'ROOT',root), patch.object(installer,'_run_script') as run:
+            installer.ensure_dependencies()
+        run.assert_called_once_with([str(root/'packaging/install-deps.sh'),'--runtime-only'],'Dependency installation')
+
+    def test_with_dependencies_failure_stops_before_installing(self):
+        with patch.object(installer,'ensure_dependencies',side_effect=RuntimeError('Dependency installation failed with exit status 1.')) as dependencies, patch.object(installer,'install') as install, patch.object(sys,'argv',['install.py','--with-dependencies','--prefix',str(self.prefix)]):
+            self.assertEqual(installer.main(),1)
+        dependencies.assert_called_once_with();install.assert_not_called()
+
+    def test_without_dependencies_skips_package_installation(self):
+        with patch.object(installer,'ensure_dependencies') as dependencies, patch.object(installer,'install',return_value=self.prefix/'app') as install, patch.object(sys,'argv',['install.py','--skip-dependency-check','--prefix',str(self.prefix)]):
+            self.assertEqual(installer.main(),0)
+        dependencies.assert_not_called();install.assert_called_once_with(self.prefix,skip_dependency_check=True)
+
+
 if __name__=='__main__':unittest.main()

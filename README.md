@@ -28,6 +28,17 @@ projects, and desktop scaling stays unchanged.
 
 ## Install
 
+On a fresh x86_64 KDE Wayland system, one command installs the distribution
+packages, builds the bridge from source, and installs the app:
+
+```sh
+./install.sh --with-dependencies
+```
+
+It asks before installing packages with `sudo`. Run it from a host terminal, not
+from inside a Flatpak or container terminal. To install packages yourself, or to
+use a release that already contains the bridge, use the plain installer:
+
 From an extracted release, or a checkout with the bridge built:
 
 ```sh
@@ -48,6 +59,10 @@ distributions, build the bridge locally before installation. See
 2. Expand an Editor, enable **Override scale**, and enter a percentage such as 150.
    Valid changes save automatically.
 3. **Close and reopen Unity through Unity Hub** to apply the setting.
+
+Unity Hub may be installed natively or as the Flathub package; with the Flatpak,
+the Editor, bridge and private display run on the host, started through
+`flatpak-spawn --host`. See [integration and restoration](docs/INTEGRATION.md).
 
 Running Editors do not change immediately. You can close the app while Unity
 runs. **Turn off Override scale before updating or uninstalling an Editor in Hub.**

@@ -1,5 +1,27 @@
 # Beta validation
 
+## Bridge prototype-v5.3
+
+-113 library regression tests passed, including popup repeated configure,
+ window-list lifecycle, cursor, viewport, output, focus and input protocol tests.
+ v5.3 adds `take_focus_toplevel_is_still_the_focus_restore_target`,
+ `popup_uses_parent_output_origin_before_its_own_enter`,
+ `popup_offset_is_relative_to_its_parent_window` and
+ `surface_serial_before_window_serial_still_associates`. The last two fail on the
+ v5.2 sources, so they guard the reported defects rather than describing them.
+- Interactive menu validation, openSUSE Tumbleweed, KDE Plasma 6 Wayland,
+ two 3840x2160 outputs at160% desktop scale, Unity6000.3.28f1, UI150%,
+ render density2, Unity Hub3.22.5 installed from Flathub:
+ menu titles open on the first click, dropdowns appear under the title instead of
+ at the screen edge, no menu is mapped without being presented, and focus restore
+ after a popup closes works. The same session exercised the Hub Flatpak launcher
+ path (`flatpak-spawn --host`) end to end.
+- Evidence for the three menu defects came from the bridge debug log
+ (`UNITY_SCALE_BRIDGE_LOG`), `_NET_CLIENT_LIST`, and X-side window geometry and
+ pixel captures: a mapped, fully painted popup window with no associated
+ wl_surface role, a popup configured from the output origin, and a press that
+ never produced a popup window.
+
 ## Bridge inherited from prototype-v5.2
 
 -109 library regression tests passed, including popup repeated configure,
@@ -42,8 +64,11 @@ Wayland captures checked the actual app layout. Latest interface behavior is
 explicit scan, expandable Editor rows, one numeric percentage control, automatic
 saving, visible collapsed scale and pending-edit confirmation.
 
-The final complete standalone suite passed88 tests with no skips on the real
-graphical session (UNITY_SCALE_TEST_GUI=1 and GSETTINGS_BACKEND=memory).
+The suite now holds95 tests (the original88 plus seven dependency-installer,
+ Hub-Flatpak launcher and runner unit tests). The complete set runs in CI under
+ Xvfb; in the contributing environment the70 non-GUI tests
+ (`test_install`, `test_core`, `test_integration`, `test_runner`) passed and the
+ GUI tests were not re-run locally.
 The GUI was also checked with the standalone non-presenting smoke command.
 The final disabled-label simplification passed all6 focused GUI-state tests.
 The generated native release was extracted into a fresh directory, installed to

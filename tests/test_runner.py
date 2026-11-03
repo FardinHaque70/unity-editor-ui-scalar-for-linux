@@ -108,6 +108,12 @@ while True:time.sleep(.01)
         self.assertEqual(plan["editor_environment"]["GDK_DPI_SCALE"], "0.5")
         self.assertNotIn("GDK_BACKEND", plan["helper_environment"])
 
+    def test_bridge_log_level_can_be_raised_for_diagnostics(self):
+        with mock.patch.dict(os.environ, {"UNITY_SCALE_BRIDGE_LOG": "debug"}):
+            plan = runner.launch_plan(str(self.root / "Original Unity"), real_executable=str(self.editor))
+        self.assertEqual(plan["helper_environment"]["RUST_LOG"], "debug")
+        self.assertEqual(runner.launch_plan(str(self.root / "Original Unity"), real_executable=str(self.editor))["helper_environment"]["RUST_LOG"], "warn")
+
     def test_no_project_required_and_dry_run_has_no_files_or_processes(self):
         with mock.patch.object(subprocess, "Popen") as popen, contextlib.redirect_stdout(io.StringIO()) as output:
             self.assertEqual(runner.run_editor(str(self.editor), dry_run=True), 0)
@@ -324,6 +330,11 @@ raise SystemExit(0)
         finally:
             other.terminate()
             other.wait(timeout=3)
+
+    def test_hub_lowercase_projectpath_is_recognized(self):
+        self.assertEqual(runner._project_from_args(["-projectpath", "/tmp/project"]), "/tmp/project")
+        self.assertEqual(runner._project_from_args(["-projectpath=/tmp/project"]), "/tmp/project")
+        self.assertIsNone(runner._project_from_args(["-projectPath"]))
 
 
 if __name__ == "__main__":

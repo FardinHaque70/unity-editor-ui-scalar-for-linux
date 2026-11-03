@@ -291,6 +291,18 @@ impl SurfaceEvents {
         drop(xdg);
 
         if let Some(pending) = pending {
+            // A popup's configure position is relative to its parent surface.
+            // Resolve the parent's absolute position before the mutable query
+            // below borrows this window's WindowData.
+            let popup_parent = match data.get::<&SurfaceRole>() {
+                Some(role) => match &*role {
+                    SurfaceRole::Popup(Some(popup)) => Some(popup.parent),
+                    _ => None,
+                },
+                None => None,
+            };
+            let popup_origin = popup_parent.map(|parent| state.window_position(parent));
+
             let mut query = data.query::<(
                 &SurfaceScaleFactor,
                 &x::Window,
@@ -300,8 +312,17 @@ impl SurfaceEvents {
             let (scale_factor, window, window_data, role) = query.get().unwrap();
 
             let window = *window;
-            let x = (pending.x.max(0) as f64 * scale_factor.0) as i32 + window_data.output_offset.x;
-            let y = (pending.y.max(0) as f64 * scale_factor.0) as i32 + window_data.output_offset.y;
+            let (base_x, base_y, pending_x, pending_y) = match popup_origin {
+                Some((parent_x, parent_y)) => (parent_x, parent_y, pending.x, pending.y),
+                None => (
+                    window_data.output_offset.x,
+                    window_data.output_offset.y,
+                    pending.x.max(0),
+                    pending.y.max(0),
+                ),
+            };
+            let x = (pending_x as f64 * scale_factor.0) as i32 + base_x;
+            let y = (pending_y as f64 * scale_factor.0) as i32 + base_y;
             let native_size = match role {
                 SurfaceRole::Popup(Some(popup)) => popup.native_size,
                 _ => None,
@@ -565,6 +586,7 @@ impl Event for client::wl_seat::Event {
 }
 
 struct PendingEnter(client::wl_pointer::Event);
+#[derive(Debug)]
 enum CurrentSurface {
     Xwayland(Entity),
     Decoration(Entity),
@@ -587,6 +609,27 @@ impl Event for client::wl_pointer::Event {
         // destroy the menu if this occurs within a 500 ms interval (which it always does with
         // Niri). Other compositors do not run into this problem because they appear to not send
         // wl_pointer.enter until the user actually moves the mouse in the popup.
+
+        /// A popup that is destroyed while the pointer is inside it can leave the
+        /// tracked pointer surface dangling. Forwarding motion or clicks in that
+        /// state would offset them by the closed popup's origin, so say so.
+        fn warn_if_pointer_surface_gone<C: XConnection>(
+            target: Entity,
+            state: &ServerState<C>,
+            event_str: &str,
+        ) {
+            if let Ok(surface) = state.world.get::<&CurrentSurface>(target) {
+                let CurrentSurface::Xwayland(surface) = *surface else {
+                    return;
+                };
+                if !state.world.contains(surface) {
+                    warn!(
+                        "{event_str} while the pointer's Xwayland surface is gone; \
+                         the pointer position may be offset by a closed popup"
+                    );
+                }
+            }
+        }
 
         fn handle_pending_enter<C: XConnection>(
             target: Entity,
@@ -694,6 +737,7 @@ impl Event for client::wl_pointer::Event {
                             }
                         }
                         None => {
+                            debug!("deferring popup pointer enter ({serial})");
                             cmd.insert(target, (PendingEnter(self),));
                         }
                     }
@@ -737,6 +781,7 @@ impl Event for client::wl_pointer::Event {
                 if !handle_pending_enter(target, state, "motion") {
                     return;
                 }
+                warn_if_pointer_surface_gone(target, state, "pointer motion");
                 {
                     let Ok(surface) = state.world.get::<&CurrentSurface>(target) else {
                         warn!("could not motion on surface: stale surface");
@@ -765,9 +810,18 @@ impl Event for client::wl_pointer::Event {
                 button,
                 state: button_state,
             } => {
-                if !handle_pending_enter(target, state, "click") {
+                // Only a press starts a new interaction. A release normally
+                // belongs to the gesture that just opened a popup, and replaying
+                // the deferred popup enter before it would deliver an EnterNotify
+                // inside the client's popup-activation interval. GTK-family
+                // clients (Unity included) tear the menu down in that case, so the
+                // menu never appears on the first click.
+                if button_state == WEnum::Value(client::wl_pointer::ButtonState::Pressed)
+                    && !handle_pending_enter(target, state, "click")
+                {
                     return;
                 }
+                warn_if_pointer_surface_gone(target, state, "pointer button");
                 let mut cmd = CommandBuffer::new();
 
                 let Ok(mut query) =
@@ -782,6 +836,7 @@ impl Event for client::wl_pointer::Event {
                 };
 
                 let (server, seat, current_surface) = query.get().unwrap();
+                debug!("pointer button {button:#x} {button_state:?} on {current_surface:?}");
 
                 // from linux/input-event-codes.h
                 mod button_codes {
